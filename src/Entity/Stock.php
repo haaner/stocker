@@ -18,9 +18,14 @@ class Stock {
     private $id;
 
     /**
+     * @ORM\Column(type="integer", unique=true)
+     */
+    private $instrumentId;
+
+    /**
      * @ORM\Column(type="string", length=255, unique=true)
      */
-    private $tag;
+    private $ticker;
 
     /**
      * @ORM\Column(type="string", length=255)
@@ -41,12 +46,22 @@ class Stock {
         return $this->id;
     }
 
-    public function getTag(): ?string {
-        return $this->tag;
+    public function getInstrumentId(): int {
+        return $this->instrumentId;
     }
 
-    public function setTag(string $tag): self {
-        $this->tag = $tag;
+    public function setInstrumentId(int $instrumentId): self {
+        $this->instrumentId = $instrumentId;
+
+        return $this;
+    }
+
+    public function getTicker(): ?string {
+        return $this->ticker;
+    }
+
+    public function setTicker(string $ticker): self {
+        $this->ticker = $ticker;
 
         return $this;
     }
