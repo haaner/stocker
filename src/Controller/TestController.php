@@ -19,7 +19,7 @@ class TestController {
     }
 
     /**
-     * @Route('/test')
+     * @Route("/test")
      * @return Response
      */
     public function test(): Response {
