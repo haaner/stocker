@@ -72,7 +72,7 @@ def init_db(conn):
     
     conn.commit()
 
-def fetch_candles_from_db(conn, instrument_id, from_dt, to_dt):
+def load_candles(conn, instrument_id, from_dt, to_dt):
     cur = conn.cursor()
     cur.execute(
         """
@@ -95,7 +95,7 @@ def fetch_candles_from_db(conn, instrument_id, from_dt, to_dt):
         )
     return candles
 
-def store_candles_to_db(conn, instrument_id, candles, weekday_bitmask):
+def save_candles(conn, instrument_id, candles, weekday_bitmask):
     cur = conn.cursor()
     to_insert = []
     for c in candles:
@@ -185,7 +185,7 @@ def load_instruments(conn):
         )
     return instruments
 
-def get_instrument_fetch_bitmask(conn, instrument_id):
+def load_instrument_weekday_bitmask(conn, instrument_id):
     cur = conn.cursor()
 
     cur.execute("SELECT weekday_bitmask FROM instruments WHERE instrument_id = ?", (str(instrument_id),))
@@ -238,9 +238,11 @@ def find_instrument_ids_from_watchlists():
 
     return unique
 
-def api_get_candles(instrument_id, granularity="OneDay", count: int = 1000):
+def fetch_candles(instrument_id, granularity="OneDay", count: int = 1000):
     path = f"/market-data/instruments/{instrument_id}/history/candles/asc/{granularity}/{count}"
-    return http_get(path)
+    result = http_get(path)
+
+    return result["candles"][0]["candles"]
 
 # --- Calculation ---
 def pct_change(start, end):
@@ -262,22 +264,21 @@ def avg_annual_return_5y(candles):
         return None
 
 def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
-    ts_now = datetime.now(timezone.utc)
+    dt_now = datetime.now(timezone.utc)
 
-    to_dt = ts_now
-    from_5y = ts_now - relativedelta(years=5)
-    from_3m = ts_now - relativedelta(months=3)
-    from_1m = ts_now - relativedelta(months=1)
+    from_5y = dt_now - relativedelta(years=5)
+    from_3m = dt_now - relativedelta(months=3)
+    from_1m = dt_now - relativedelta(months=1)
 
-    cached = fetch_candles_from_db(conn, instrument_id, from_5y, to_dt)
+    cached = load_candles(conn, instrument_id, from_5y, dt_now)
 
-    weekday = date.today().isoweekday()
-    weekday_bitmask_now = weekday_bitmask = 1 << weekday
+    weekday_now = dt_now.isoweekday()
+    weekday_bitmask_now = weekday_bitmask = 1 << weekday_now
 
     def parse_db_date(dstr):
         return datetime.fromisoformat(dstr.replace("Z", "+00:00")).astimezone(pytz.UTC)
        
-    weekday_bitmask = get_instrument_fetch_bitmask(conn, instrument_id)
+    weekday_bitmask = load_instrument_weekday_bitmask(conn, instrument_id)
    
     if weekday_bitmask is None:
         weekday_bitmask = weekday_bitmask_now
@@ -287,7 +288,7 @@ def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
     else:
         last_cached = parse_db_date(cached[-1]["date"])
 
-        delta = ts_now - last_cached
+        delta = dt_now - last_cached
         days = delta.days 
 
         if (weekday_bitmask & weekday_bitmask_now) and days < 1000:
@@ -300,13 +301,12 @@ def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
             count = 1000
         
     if fetch_remotely and (len(cached) == 0 or count):
-        api_resp = api_get_candles(instrument_id, granularity=granularity, count=count)
+        candles = fetch_candles(instrument_id, granularity=granularity, count=count)
 
-        candles = api_resp["candles"][0]["candles"]
         if candles:
-            store_candles_to_db(conn, instrument_id, candles, weekday_bitmask)
+            save_candles(conn, instrument_id, candles, weekday_bitmask)
 
-        cached = fetch_candles_from_db(conn, instrument_id, from_5y, to_dt)
+        cached = load_candles(conn, instrument_id, from_5y, dt_now)
 
     c_sorted = sorted(cached, key=lambda x: x["date"])
 
