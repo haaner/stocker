@@ -342,9 +342,9 @@ def print_row(symbol, name, iid, metrics):
 def parse_args():
     p = argparse.ArgumentParser(description="Filter watchlist stocks by performance criteria with SQLite candle cache")
 
-    p.add_argument("-x", type=float, default=20, required=False, help="min avg annual growth (percent) over last 5 years")
-    p.add_argument("-y", type=float, default=10, required=False, help="min decline percent over last 3 months (positive number)")
-    p.add_argument("-z", type=float, default=0, required=False, help="min rise percent in last month")
+    p.add_argument("-x", type=float, default=20, required=False, help="min avg annual percentual change over last 5 years")
+    p.add_argument("-y", type=float, default=-10, required=False, help="min percentual change over last 3 months")
+    p.add_argument("-z", type=float, default=0, required=False, help="min percentual change in last month")
 
     p.add_argument('--fetch', action=argparse.BooleanOptionalAction, help="fetch remote data")
 
@@ -390,7 +390,7 @@ def main():
         if metrics["5y_annual_change"] is None or metrics["3m_change"] is None or metrics["1m_change"] is None:
             continue
 
-        if metrics["5y_annual_change"] >= min_x and metrics["3m_change"] <= -abs(min_y) and metrics["1m_change"] >= min_z:
+        if metrics["5y_annual_change"] >= min_x and metrics["3m_change"] <= min_y and metrics["1m_change"] >= min_z:
             print_row(symbol, name, instrument_id, metrics)
 
     conn.close()
