@@ -246,23 +246,28 @@ def fetch_candles(instrument_id, granularity="OneDay", count: int = 1000):
 
 # --- Calculation ---
 def pct_change(start, end):
-    if start is None or end is None or start == 0:
-        return None
     return (end - start) / start * 100.0
 
-def avg_annual_return_5y(candles):
-    if not candles:
+def parse_db_date(dstr):
+    return datetime.fromisoformat(dstr.replace("Z", "+00:00")).astimezone(pytz.UTC)
+
+def avg_annual_return_5y(candles, from_5y):
+    
+    if not candles or len(candles) < 2:
         return None
-    start_price = candles[0]['open']
-    end_price = candles[-1]['open']
-    years = 5.0
-    if not start_price or start_price <= 0:
-        return None
-    try:
-        return ((end_price / start_price) ** (1.0 / years) - 1.0) * 100.0
-    except Exception:
+    
+    dstr = candles[0]['date']  
+    d = parse_db_date(dstr)
+    
+    if d < from_5y:
         return None
 
+    start_price = candles[0]['open']
+    end_price = candles[-1]['open']
+
+    years = 5.0
+    return ((end_price / start_price) ** (1.0 / years) - 1.0) * 100.0
+    
 def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
     dt_now = datetime.now(timezone.utc)
 
@@ -274,9 +279,6 @@ def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
 
     weekday_now = dt_now.isoweekday()
     weekday_bitmask_now = weekday_bitmask = 1 << weekday_now
-
-    def parse_db_date(dstr):
-        return datetime.fromisoformat(dstr.replace("Z", "+00:00")).astimezone(pytz.UTC)
        
     weekday_bitmask = load_instrument_weekday_bitmask(conn, instrument_id)
    
@@ -310,7 +312,8 @@ def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
 
     c_sorted = sorted(cached, key=lambda x: x["date"])
 
-    cagr_5y = avg_annual_return_5y(c_sorted) if len(c_sorted) >= 2 else None
+    cagr_5y = avg_annual_return_5y(c_sorted, from_5y)
+    
     latest_price = c_sorted[-1]["open"] if c_sorted else None
 
     price_3m_start = None
