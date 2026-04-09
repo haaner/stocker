@@ -164,6 +164,8 @@ def fetch_instruments(conn):
             "displayName": name
         }) 
 
+    return inst
+
 def load_instruments(conn):
     cur = conn.cursor()
     cur.execute(
