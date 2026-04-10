@@ -8,6 +8,24 @@ import uuid
 import argparse
 import sqlite3
 
+from sqlalchemy import (
+    create_engine,
+    Engine,
+
+    Column,
+    String,
+    Integer,
+    Float,
+
+    PrimaryKeyConstraint,
+    Index,
+    
+    select,
+    and_,
+)
+
+from sqlalchemy.orm import declarative_base, Session
+
 from time import sleep
 from datetime import date, datetime, timezone
 from dateutil.relativedelta import relativedelta
@@ -44,102 +62,86 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-def init_db(conn):
-    cur = conn.cursor()
+Base = declarative_base()
 
-    cur.execute(
-        """
-    CREATE TABLE IF NOT EXISTS candles (
-        instrument_id TEXT NOT NULL,
-        date TEXT NOT NULL,  
-        open REAL,
-        PRIMARY KEY (instrument_id, date)
-    )"""
+class Candle(Base):
+    __tablename__ = "candles"
+    instrument_id = Column(String, nullable=False)
+    date = Column(String, nullable=False) # Zulu-DATETIME
+    open = Column(Float)
+    __table_args__ = (
+        PrimaryKeyConstraint("instrument_id", "date", name="pk_candles"),
+        Index("idx_instrument_date", "instrument_id", "date"),
     )
-    
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_instrument_date ON candles(instrument_id, date)")
-    
-    cur.execute(
-        """
-    CREATE TABLE IF NOT EXISTS instruments (
-        instrument_id TEXT PRIMARY KEY,
-        symbol TEXT,
-        name TEXT,
-        last_candles_fetch TEXT,
-        weekday_bitmask INT
-    )"""
-    )
-    
-    conn.commit()
 
-def load_candles(conn, instrument_id, from_dt, to_dt):
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT date, open
-        FROM candles
-        WHERE instrument_id = ?
-          AND date BETWEEN ? AND ?
-        ORDER BY date ASC
-    """,
-        (str(instrument_id), from_dt.isoformat(), to_dt.isoformat()),
-    )
-    rows = cur.fetchall()
-    candles = []
-    for r in rows:
-        candles.append(
-            {
-                "date": r[0],
-                "open": r[1]
-            }
+class Instrument(Base):
+    __tablename__ = "instruments"
+    instrument_id = Column(String, primary_key=True)
+    symbol = Column(String)
+    name = Column(String)
+    last_candles_fetch = Column(String) # Zulu-DATETIME
+    weekday_bitmask = Column(Integer)
+
+def init_db() -> Engine:
+    engine = create_engine(f"sqlite:///{DB_PATH}", future=True)
+    Base.metadata.create_all(engine)
+
+    return engine
+
+def load_candles(session: Session, instrument_id, from_dt, to_dt) -> list[Candle]:
+    stmt = (
+        select(Candle)
+        .where(
+            and_(
+                Candle.instrument_id == str(instrument_id),
+                Candle.date.between(from_dt.isoformat(), to_dt.isoformat()),
+            )
         )
-    return candles
-
-def save_candles(conn, instrument_id, candles, weekday_bitmask):
-    cur = conn.cursor()
-    to_insert = []
-    for c in candles:
-        date = c.get("fromDate")
-        open = c.get("open")
-        to_insert.append((str(instrument_id), date, open))
-
-    cur.executemany(
-        """
-        INSERT OR REPLACE INTO candles (instrument_id, date, open)
-        VALUES (?, ?, ?)
-    """,
-        to_insert,
+        .order_by(Candle.date.asc())
     )
+    return session.execute(stmt).scalars().all()
+
+def save_candles(session: Session, instrument_id, candles, weekday_bitmask):
+    
+    for c in candles:
+        date_str = c.get("fromDate")
+        open_price = c.get("open")
+
+        # use SQLAlchemy merge which does INSERT OR REPLACE semantics for primary key collisions
+        session.merge(Candle(instrument_id=str(instrument_id), date=date_str, open=open_price))
 
     now_iso = datetime.now(timezone.utc).replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
-    cur.execute(
-        """
-        INSERT INTO instruments (instrument_id, last_candles_fetch, weekday_bitmask)
-        VALUES (?, ?, ?)
-        ON CONFLICT(instrument_id) DO UPDATE SET last_candles_fetch=excluded.last_candles_fetch, weekday_bitmask=excluded.weekday_bitmask
-    """,
-        (str(instrument_id), now_iso, weekday_bitmask),
-    )
+    # upsert instrument's last_candles_fetch and weekday_bitmask
+    inst = session.get(Instrument, str(instrument_id))
+   
+    if inst is None:
+        inst = Instrument(instrument_id=str(instrument_id), last_candles_fetch=now_iso, weekday_bitmask=weekday_bitmask)
+    else:
+        inst.last_candles_fetch = now_iso
+        inst.weekday_bitmask = weekday_bitmask
 
-    conn.commit()
+    session.merge(inst)
+    session.commit()
 
-def save_instrument(conn, id, symbol, name):
-    cur = conn.cursor()
+def save_instrument(session: Session, id, symbol, name) -> Instrument:
+    i = session.get(Instrument, str(id))
 
-    cur.execute(
-        """
-        INSERT INTO instruments (instrument_id, symbol, name)
-        VALUES (?, ?, ?)
-        ON CONFLICT(instrument_id) DO UPDATE SET symbol=excluded.symbol, name=excluded.name
-    """,
-        (str(id), symbol, name),
-    )
+    if i is None:
+        i = Instrument(instrument_id=str(id), symbol=symbol, name=name)
+    else:
+        if symbol is not None:
+            i.symbol = symbol
+        if name is not None:
+            i.name = name
 
-    conn.commit() 
+    session.merge(i)
+    session.commit()
 
-def fetch_instruments(conn):
-    instruments = find_instrument_ids_from_watchlists()
+    return i
+
+def fetch_instruments(session: Session) -> list[Instrument]:
+    instruments = fetch_watchlists_and_instruments()
     if not instruments:
         print("Keine Watchlist-Instrumente gefunden.", file=sys.stderr)
         sys.exit(1)
@@ -150,53 +152,29 @@ def fetch_instruments(conn):
         market = r.get("market")
 
         if market is None:
-            symbol = market = "-"
-            name = "-"
+            symbol = None
+            name = None
         else:
             symbol = market.get("symbolName")
             name = market.get("displayName")            
             
-        save_instrument(conn, instrument_id, symbol, name)
+        i = save_instrument(session, instrument_id, symbol, name)
 
-        inst.append( {
-            "instrumentId": instrument_id,
-            "symbolName": symbol,
-            "displayName": name
-        }) 
+        inst.append(i) 
 
     return inst
 
-def load_instruments(conn):
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT instrument_id, symbol, name
-        FROM instruments
-        """
-    )
+def load_instruments(session: Session) -> list[Instrument]:
+    stmt = select(Instrument).order_by(Instrument.instrument_id)
+    return session.execute(stmt).scalars().all()
 
-    rows = cur.fetchall()
-    instruments = []
-    for r in rows:
-        instruments.append(
-            {
-                "instrumentId": r[0],
-                "symbolName": r[1],
-                "displayName": r[2],
-            }
-        )
-    return instruments
+def load_instrument_weekday_bitmask(session: Session, instrument_id) -> int | None:
+    inst = session.get(Instrument, str(instrument_id))
 
-def load_instrument_weekday_bitmask(conn, instrument_id):
-    cur = conn.cursor()
-
-    cur.execute("SELECT weekday_bitmask FROM instruments WHERE instrument_id = ?", (str(instrument_id),))
-    row = cur.fetchone()
-    
-    if not row:
+    if not inst:
         return None
     
-    return row[0]
+    return inst.weekday_bitmask
 
 def http_get(path, params=None):
     url = f"https://public-api.etoro.com/api/v1{path}"
@@ -212,22 +190,22 @@ def http_get(path, params=None):
     r.raise_for_status()
     return r.json()
 
-def get_watchlists():
+def fetch_watchlists():
     return http_get("/watchlists")["watchlists"]
 
-def get_watchlist_detail(wl_id):
+def fetch_watchlist_detail(wl_id):
     return http_get(f"/watchlists/{wl_id}")
 
-def find_instrument_ids_from_watchlists():
+def fetch_watchlists_and_instruments():
     unique = {}
 
-    wlists = get_watchlists()
+    wlists = fetch_watchlists()
     for wl in wlists:
         wl_id = wl.get("watchlistId")
         if not wl_id:
             continue
         try:
-            detail = get_watchlist_detail(wl_id)
+            detail = fetch_watchlist_detail(wl_id)
         except Exception as e:
             print(f"WARN: Watchlist {wl_id} nicht geladen: {e}", file=sys.stderr)
 
@@ -253,36 +231,36 @@ def pct_change(start, end):
 def parse_db_date(dstr):
     return datetime.fromisoformat(dstr.replace("Z", "+00:00")).astimezone(pytz.UTC)
 
-def avg_annual_return_5y(candles, from_5y):
+def avg_annual_return_5y(candles: list[Candle], from_5y):
     
     if not candles or len(candles) < 2:
         return None
     
-    dstr = candles[0]['date']  
+    dstr = candles[0].date  
     d = parse_db_date(dstr)
     
     if d < from_5y:
         return None
 
-    start_price = candles[0]['open']
-    end_price = candles[-1]['open']
+    start_price = candles[0].open
+    end_price = candles[-1].open
 
     years = 5.0
     return ((end_price / start_price) ** (1.0 / years) - 1.0) * 100.0
     
-def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
+def compute_metrics_with_cache(session: Session, instrument_id, fetch_remotely: bool):
     dt_now = datetime.now(timezone.utc)
 
     from_5y = dt_now - relativedelta(years=5)
     from_3m = dt_now - relativedelta(months=3)
     from_1m = dt_now - relativedelta(months=1)
 
-    cached = load_candles(conn, instrument_id, from_5y, dt_now)
+    cached = load_candles(session, instrument_id, from_5y, dt_now)
 
     weekday_now = dt_now.isoweekday()
     weekday_bitmask_now = weekday_bitmask = 1 << weekday_now
        
-    weekday_bitmask = load_instrument_weekday_bitmask(conn, instrument_id)
+    weekday_bitmask = load_instrument_weekday_bitmask(session, instrument_id)
    
     if weekday_bitmask is None:
         weekday_bitmask = weekday_bitmask_now
@@ -290,7 +268,7 @@ def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
         granularity = 'OneWeek'
         count = 1000
     else:
-        last_cached = parse_db_date(cached[-1]["date"])
+        last_cached = parse_db_date(cached[-1].date)
 
         delta = dt_now - last_cached
         days = delta.days 
@@ -308,31 +286,30 @@ def compute_metrics_with_cache(conn, instrument_id, fetch_remotely: bool):
         candles = fetch_candles(instrument_id, granularity=granularity, count=count)
 
         if candles:
-            save_candles(conn, instrument_id, candles, weekday_bitmask)
+            save_candles(session, instrument_id, candles, weekday_bitmask)
 
-        cached = load_candles(conn, instrument_id, from_5y, dt_now)
+        cached = load_candles(session, instrument_id, from_5y, dt_now)
 
-    c_sorted = sorted(cached, key=lambda x: x["date"])
+    c_sorted = sorted(cached, key=lambda x: x.date)
 
     cagr_5y = avg_annual_return_5y(c_sorted, from_5y)
     
-    latest_price = c_sorted[-1]["open"] if c_sorted else None
+    latest_price = c_sorted[-1].open if c_sorted else None
 
     price_3m_start = None
     price_1m_start = None
 
     for c in c_sorted:
-        dstr = c.get("date")
+        dstr = c.date
         
-        d = parse_db_date(dstr) if isinstance(dstr, str) else None
+        d = parse_db_date(dstr)
    
-        if d:
-            if price_3m_start is None and d >= from_3m:
-                price_3m_start = c.get("open")
-            if price_1m_start is None and d >= from_1m:
-                price_1m_start = c.get("open")
-            if price_3m_start is not None and price_1m_start is not None:
-                break
+        if price_3m_start is None and d >= from_3m:
+            price_3m_start = c.open
+        if price_1m_start is None and d >= from_1m:
+            price_1m_start = c.open
+        if price_3m_start is not None and price_1m_start is not None:
+            break
 
     change_3m = pct_change(price_3m_start, latest_price) if price_3m_start and latest_price else None
     change_1m = pct_change(price_1m_start, latest_price) if price_1m_start and latest_price else None
@@ -371,34 +348,32 @@ def main():
     if fetch is None:
         fetch = False
 
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
+    engine = init_db()
+    with Session(engine) as session:
 
-    if fetch:
-        inst = fetch_instruments(conn)
-    else:
-        inst = load_instruments(conn)
+        if fetch:
+            inst = fetch_instruments(session)
+        else:
+            inst = load_instruments(session)
 
-    print("Symbol\tName\tInstrumentId\t5y_annual_change(%)\t3m_change(%)\t1m_change(%)")
+        print("Symbol\tName\tInstrumentId\t5y_annual_change(%)\t3m_change(%)\t1m_change(%)")
 
-    for raw in inst:
-        instrument_id = raw['instrumentId']
-        symbol = raw['symbolName']
-        name = raw['displayName']
+        for i in inst:
+            instrument_id = i.instrument_id
+            symbol = i.symbol
+            name = i.name
 
-        try:
-            metrics = compute_metrics_with_cache(conn, instrument_id, fetch)
-        except Exception as e:
-            print(f"WARN: Fehler beim Laden/Cache für {instrument_id}: {e}", file=sys.stderr)
-            continue
+            try:
+                metrics = compute_metrics_with_cache(session, instrument_id, fetch)
+            except Exception as e:
+                print(f"WARN: Fehler beim Laden/Cache für {instrument_id}: {e}", file=sys.stderr)
+                continue
 
-        if metrics["5y_annual_change"] is None or metrics["3m_change"] is None or metrics["1m_change"] is None:
-            continue
+            if metrics["5y_annual_change"] is None or metrics["3m_change"] is None or metrics["1m_change"] is None:
+                continue
 
-        if metrics["5y_annual_change"] >= min_x and metrics["3m_change"] <= min_y and metrics["1m_change"] >= min_z:
-            print_row(symbol, name, instrument_id, metrics)
-
-    conn.close()
+            if metrics["5y_annual_change"] >= min_x and metrics["3m_change"] <= min_y and metrics["1m_change"] >= min_z:
+                print_row(symbol, name, instrument_id, metrics)
 
 if __name__ == "__main__":
     main()
