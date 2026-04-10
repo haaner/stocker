@@ -6,7 +6,6 @@ import os
 import sys
 import uuid
 import argparse
-import sqlite3
 
 from sqlalchemy import (
     create_engine,
