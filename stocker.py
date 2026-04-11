@@ -230,29 +230,77 @@ def pct_change(start, end):
 def parse_db_date(dstr):
     return datetime.fromisoformat(dstr.replace("Z", "+00:00")).astimezone(pytz.UTC)
 
-def avg_annual_return_5y(candles: list[Candle], from_5y):
+def avg_annual_return(candles: list[Candle], years: float):
     
     if not candles or len(candles) < 2:
         return None
     
-    dstr = candles[0].date  
-    d = parse_db_date(dstr)
+    dt_now = datetime.now(timezone.utc)
+    start_dt = dt_now - relativedelta(years=years)
+
+    d = None
+    for c in candles:
+        d = parse_db_date(c.date)
+
+        if d >= start_dt:
+            break
     
-    if d < from_5y:
+    if d is None or d < start_dt:
         return None
 
-    start_price = candles[0].open
+    start_price = c.open
     end_price = candles[-1].open
 
-    years = 5.0
     return ((end_price / start_price) ** (1.0 / years) - 1.0) * 100.0
+
+
+class MetricMeta:
+    def __init__(self, from_dt: datetime = None) -> None:
+        self.fromDt: datetime = from_dt
+        self.priceStart: float = None
+
+class MetricDetail:
+     def __init__(self, metric_meta: MetricMeta) -> None:
+        self.meta: MetricMeta = metric_meta
+        self.percentualChange: float = None
+
+class Metric:
+    def __init__(
+        self,
+        y5_annual: float = None,
+        y2_annual: float = None,
+
+        y1: float = None,
+        m3: float = None,
+        m1: float = None
+    ) -> None:
+        self.y5_annual = y5_annual
+        self.y2_annual = y2_annual
+
+        self.y1 = y1
+        self.m3 = m3
+        self.m1 = m1
+
+    def from_list(self, values: list):
+        attrs = list(self.__dict__.keys())
+        for name, val in zip(attrs, values):
+            setattr(self, name, val)
+        return self
+
+class InstrumentMetric:
+     def __init__(
+        self,
+        instrument: Instrument,
+        metric: Metric
+    ) -> None:
+        self.instrument = instrument
+        self.metric = metric
     
-def compute_metrics_with_cache(session: Session, instrument_id, fetch_remotely: bool):
+def compute_metric(session: Session, instrument_id, fetch_remotely: bool) -> Metric:
+ 
     dt_now = datetime.now(timezone.utc)
 
     from_5y = dt_now - relativedelta(years=5)
-    from_3m = dt_now - relativedelta(months=3)
-    from_1m = dt_now - relativedelta(months=1)
 
     cached = load_candles(session, instrument_id, from_5y, dt_now)
 
@@ -291,42 +339,57 @@ def compute_metrics_with_cache(session: Session, instrument_id, fetch_remotely: 
 
     c_sorted = sorted(cached, key=lambda x: x.date)
 
-    cagr_5y = avg_annual_return_5y(c_sorted, from_5y)
-    
     latest_price = c_sorted[-1].open if c_sorted else None
-
-    price_3m_start = None
-    price_1m_start = None
+           
+    metrics_meta = [
+        MetricMeta(dt_now - relativedelta(years=1)),
+        MetricMeta(dt_now - relativedelta(months=3)),
+        MetricMeta(dt_now - relativedelta(months=1)),
+    ]
 
     for c in c_sorted:
         dstr = c.date
         
         d = parse_db_date(dstr)
-   
-        if price_3m_start is None and d >= from_3m:
-            price_3m_start = c.open
-        if price_1m_start is None and d >= from_1m:
-            price_1m_start = c.open
-        if price_3m_start is not None and price_1m_start is not None:
+
+        metrics_computed = True
+        for mm in metrics_meta:
+            if mm.priceStart is None and d >= mm.fromDt:
+                mm.priceStart = c.open   
+            else:
+                metrics_computed = False
+    
+        if metrics_computed:
             break
 
-    change_3m = pct_change(price_3m_start, latest_price) if price_3m_start and latest_price else None
-    change_1m = pct_change(price_1m_start, latest_price) if price_1m_start and latest_price else None
+    l = [ avg_annual_return(c_sorted, 5.0), avg_annual_return(c_sorted, 2.0) ]
 
-    return {"5y_annual_change": cagr_5y, "3m_change": change_3m, "1m_change": change_1m}
+    for mm in metrics_meta:
+        change = pct_change(mm.priceStart, latest_price) if mm.priceStart and latest_price else None
+        l.append(change)
 
-def print_row(symbol, name, iid, metrics):
+    m = Metric()
+    m.from_list(l)
+
+    return m
+
+def print_columns(cols: list):
+    print(f"{cols[0]:<10}{cols[1][:24]:25}{cols[2]:>10}{cols[3]:>10}{cols[4]:>10}{cols[5]:>10}{cols[6]:>10}")
+
+def print_instrument_metric(symbol, name, iid, metric: Metric):
     def fmt(v):
         return "-" if v is None else f"{v:.2f}"
-    print(f"{symbol}\t{name}\t{iid}\t{fmt(metrics.get('5y_annual_change'))}\t{fmt(metrics.get('3m_change'))}\t{fmt(metrics.get('1m_change'))}")
+    
+    print_columns([ symbol, name, fmt(metric.y5_annual), fmt(metric.y2_annual), fmt(metric.y1), fmt(metric.m3), fmt(metric.m1) ])
 
 def parse_args():
     p = argparse.ArgumentParser(description="Filter watchlist stocks by performance criteria with SQLite candle cache")
 
-    p.add_argument("-x", type=float, default=20, required=False, help="min avg annual percentual change over last 5 years")
-    p.add_argument("-y", type=float, default=-10, required=False, help="min percentual change over last 3 months")
-    p.add_argument("-z", type=float, default=0, required=False, help="min percentual change in last month")
+    p.add_argument("-x", type=float, default=None, required=False, help="min avg annual percentual change over last 5 years")
+    p.add_argument("-y", type=float, default=None, required=False, help="max percentual change over last 3 months")
+    p.add_argument("-z", type=float, default=None, required=False, help="min percentual change in last month")
 
+    p.add_argument('--cont', action=argparse.BooleanOptionalAction, help="only continous stocks") 
     p.add_argument('--fetch', action=argparse.BooleanOptionalAction, help="fetch remote data")
 
     try:
@@ -343,6 +406,10 @@ def main():
     min_y = args.y
     min_z = args.z
 
+    cont = args.cont
+    if cont is None:
+        cont = False
+
     fetch = args.fetch
     if fetch is None:
         fetch = False
@@ -355,7 +422,9 @@ def main():
         else:
             inst = load_instruments(session)
 
-        print("Symbol\tName\tInstrumentId\t5y_annual_change(%)\t3m_change(%)\t1m_change(%)")
+        print_columns([ "Symbol", "Name", "5y/y(%)", "2y/y(%)", "1y(%)", "3m(%)", "1m(%)" ])
+
+        metrics_for_sort: list[InstrumentMetric] = []
 
         for i in inst:
             instrument_id = i.instrument_id
@@ -363,16 +432,28 @@ def main():
             name = i.name
 
             try:
-                metrics = compute_metrics_with_cache(session, instrument_id, fetch)
+                metric = compute_metric(session, instrument_id, fetch)
             except Exception as e:
-                print(f"WARN: Fehler beim Laden/Cache für {instrument_id}: {e}", file=sys.stderr)
+                print(f"WARN: Fehler bei der Metrik-Berechnung für {instrument_id}: {e}", file=sys.stderr)
                 continue
 
-            if metrics["5y_annual_change"] is None or metrics["3m_change"] is None or metrics["1m_change"] is None:
+            if (avg5annual := metric.y5_annual) is None or metric.y2_annual is None or metric.y1 is None or metric.m3 is None or metric.m1 is None:
                 continue
 
-            if metrics["5y_annual_change"] >= min_x and metrics["3m_change"] <= min_y and metrics["1m_change"] >= min_z:
-                print_row(symbol, name, instrument_id, metrics)
+            if (min_x is None or avg5annual >= min_x) and (cont == False or (metric.y2_annual <= avg5annual * 1.75 and metric.y2_annual >= avg5annual * 0.75)) and (min_y is None or metric.m3 <= min_y) and (min_z is None or metric.m1 >= min_z):
+                if fetch:
+                    print_instrument_metric(symbol, name, instrument_id, metric)
+                else:
+                    metrics_for_sort.append(InstrumentMetric(i, metric))
+
+        if not fetch:
+            metrics_sorted = sorted(metrics_for_sort, key=lambda x: x.metric.y5_annual, reverse=True)
+            
+            for ms in metrics_sorted:
+                i = ms.instrument
+                m = ms.metric
+
+                print_instrument_metric(i.symbol, i.name, i.instrument_id, m)        
 
 if __name__ == "__main__":
     main()
