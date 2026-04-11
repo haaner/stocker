@@ -440,7 +440,7 @@ def main():
             if (avg5annual := metric.y5_annual) is None or metric.y2_annual is None or metric.y1 is None or metric.m3 is None or metric.m1 is None:
                 continue
 
-            if (min_x is None or avg5annual >= min_x) and (cont == False or (metric.y2_annual <= avg5annual * 1.75 and metric.y2_annual >= avg5annual * 0.75)) and (min_y is None or metric.m3 <= min_y) and (min_z is None or metric.m1 >= min_z):
+            if (min_x is None or avg5annual >= min_x) and (cont == False or (metric.y1 <= avg5annual * 1.5 and metric.y1 >= avg5annual * 0.75)) and (min_y is None or metric.m3 <= min_y) and (min_z is None or metric.m1 >= min_z):
                 if fetch:
                     print_instrument_metric(symbol, name, instrument_id, metric)
                 else:
