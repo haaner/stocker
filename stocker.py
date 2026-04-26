@@ -230,14 +230,20 @@ def pct_change(start, end):
 def parse_db_date(dstr):
     return datetime.fromisoformat(dstr.replace("Z", "+00:00")).astimezone(pytz.UTC)
 
-def avg_annual_return(candles: list[Candle], years: float):
+def avg_annual_return(candles: list[Candle], years_duration: float, years_back: float = None):
     
     if not candles or len(candles) < 2:
         return None
     
     dt_now = datetime.now(timezone.utc)
-    start_dt = dt_now - relativedelta(years=years)
 
+    start_dt = dt_now - relativedelta(years=years_duration)
+    end_dt = dt_now
+
+    if years_back:
+        start_dt -= relativedelta(years=years_back)
+        end_dt -= relativedelta(years=years_back)
+    
     d = None
     for c in candles:
         d = parse_db_date(c.date)
@@ -245,13 +251,27 @@ def avg_annual_return(candles: list[Candle], years: float):
         if d >= start_dt:
             break
     
-    if d is None or d < start_dt:
+    if d is None: # or d < start_dt:
         return None
 
     start_price = c.open
-    end_price = candles[-1].open
 
-    return ((end_price / start_price) ** (1.0 / years) - 1.0) * 100.0
+    ###
+
+    d = None
+    for c in candles:
+        d = parse_db_date(c.date)
+
+        if d >= end_dt:
+            break
+    
+    if d is None:
+        return None
+
+    #end_price = candles[-1].open
+    end_price = c.open
+
+    return ((end_price / start_price) ** (1.0 / years_duration) - 1.0) * 100.0
 
 
 class MetricMeta:
@@ -268,6 +288,7 @@ class Metric:
     def __init__(
         self,
         y5_annual: float = None,
+        y3b2_annual: float = None,
         y2_annual: float = None,
 
         y1: float = None,
@@ -275,6 +296,7 @@ class Metric:
         m1: float = None
     ) -> None:
         self.y5_annual = y5_annual
+        self.y3b2_annual = y3b2_annual
         self.y2_annual = y2_annual
 
         self.y1 = y1
@@ -307,7 +329,10 @@ def compute_metric(session: Session, instrument_id, fetch_remotely: bool) -> Met
     weekday_now = dt_now.isoweekday()
     weekday_bitmask_now = weekday_bitmask = 1 << weekday_now
        
-    weekday_bitmask = load_instrument_weekday_bitmask(session, instrument_id)
+    if len(cached) == 0:
+        weekday_bitmask = None
+    else:
+        weekday_bitmask = load_instrument_weekday_bitmask(session, instrument_id)
    
     if weekday_bitmask is None:
         weekday_bitmask = weekday_bitmask_now
@@ -362,7 +387,7 @@ def compute_metric(session: Session, instrument_id, fetch_remotely: bool) -> Met
         if metrics_computed:
             break
 
-    l = [ avg_annual_return(c_sorted, 5.0), avg_annual_return(c_sorted, 2.0) ]
+    l = [ avg_annual_return(c_sorted, 5.0), avg_annual_return(c_sorted, 3.0, 2.0), avg_annual_return(c_sorted, 2.0) ]
 
     for mm in metrics_meta:
         change = pct_change(mm.priceStart, latest_price) if mm.priceStart and latest_price else None
@@ -374,13 +399,13 @@ def compute_metric(session: Session, instrument_id, fetch_remotely: bool) -> Met
     return m
 
 def print_columns(cols: list):
-    print(f"{cols[0]:<10}{cols[1][:24]:25}{cols[2]:>10}{cols[3]:>10}{cols[4]:>10}{cols[5]:>10}{cols[6]:>10}")
+    print(f"{cols[0]:<10}{cols[1][:24]:25}{cols[2]:>10}{cols[3]:>10}{cols[4]:>10}{cols[5]:>10}{cols[6]:>10}{cols[7]:>10}")
 
 def print_instrument_metric(symbol, name, iid, metric: Metric):
     def fmt(v):
         return "-" if v is None else f"{v:.2f}"
     
-    print_columns([ symbol, name, fmt(metric.y5_annual), fmt(metric.y2_annual), fmt(metric.y1), fmt(metric.m3), fmt(metric.m1) ])
+    print_columns([ symbol, name, fmt(metric.y5_annual), fmt(metric.y3b2_annual), fmt(metric.y2_annual), fmt(metric.y1), fmt(metric.m3), fmt(metric.m1) ])
 
 def parse_args():
     p = argparse.ArgumentParser(description="Filter watchlist stocks by performance criteria with SQLite candle cache")
@@ -422,7 +447,7 @@ def main():
         else:
             inst = load_instruments(session)
 
-        print_columns([ "Symbol", "Name", "5y/y(%)", "2y/y(%)", "1y(%)", "3m(%)", "1m(%)" ])
+        print_columns([ "Symbol", "Name", "5y/y(%)", "3yb2/y(%)", "2y/y(%)", "1y(%)", "3m(%)", "1m(%)" ])
 
         metrics_for_sort: list[InstrumentMetric] = []
 
@@ -437,10 +462,10 @@ def main():
                 print(f"WARN: Fehler bei der Metrik-Berechnung für {instrument_id}: {e}", file=sys.stderr)
                 continue
 
-            if (avg5annual := metric.y5_annual) is None or metric.y2_annual is None or metric.y1 is None or metric.m3 is None or metric.m1 is None:
+            if metric.y5_annual is None or metric.y3b2_annual is None or metric.y2_annual is None or metric.y1 is None or metric.m3 is None or metric.m1 is None:
                 continue
 
-            if (min_x is None or avg5annual >= min_x) and (cont == False or (metric.y1 <= avg5annual * 1.5 and metric.y1 >= avg5annual * 0.75)) and (min_y is None or metric.m3 <= min_y) and (min_z is None or metric.m1 >= min_z):
+            if (min_x is None or metric.y5_annual >= min_x) and (cont == False or (metric.y2_annual <= metric.y3b2_annual * 1.5 and metric.y2_annual >= metric.y3b2_annual * 0.75)) and (min_y is None or metric.m3 <= min_y) and (min_z is None or metric.m1 >= min_z):
                 if fetch:
                     print_instrument_metric(symbol, name, instrument_id, metric)
                 else:
