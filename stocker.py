@@ -21,6 +21,7 @@ from sqlalchemy import (
     
     select,
     and_,
+    delete
 )
 
 from sqlalchemy.orm import declarative_base, Session
@@ -87,13 +88,15 @@ def init_db() -> Engine:
 
     return engine
 
-def load_candles(session: Session, instrument_id, from_dt, to_dt) -> list[Candle]:
+#def load_candles(session: Session, instrument_id, from_dt, to_dt) -> list[Candle]:
+def load_candles(session: Session, instrument_id, from_dt) -> list[Candle]:    
     stmt = (
         select(Candle)
         .where(
             and_(
                 Candle.instrument_id == str(instrument_id),
-                Candle.date.between(from_dt.isoformat(), to_dt.isoformat()),
+                #Candle.date.between(from_dt.isoformat(), to_dt.isoformat()),
+                Candle.date > from_dt
             )
         )
         .order_by(Candle.date.asc())
@@ -139,13 +142,13 @@ def save_instrument(session: Session, id, symbol, name) -> Instrument:
 
     return i
 
-def fetch_instruments(session: Session) -> list[Instrument]:
+def fetch_instruments(session: Session) -> dict[Instrument]:
     instruments = fetch_watchlists_and_instruments()
     if not instruments:
         print("Keine Watchlist-Instrumente gefunden.", file=sys.stderr)
         sys.exit(1)
 
-    inst = []
+    inst = {}
     for iid, r in instruments.items():
         instrument_id = r.get("itemId")
         market = r.get("market")
@@ -159,7 +162,7 @@ def fetch_instruments(session: Session) -> list[Instrument]:
             
         i = save_instrument(session, instrument_id, symbol, name)
 
-        inst.append(i) 
+        inst[instrument_id] = i 
 
     return inst
 
@@ -322,9 +325,9 @@ def compute_metric(session: Session, instrument_id, fetch_remotely: bool) -> Met
  
     dt_now = datetime.now(timezone.utc)
 
-    from_5y = dt_now - relativedelta(years=5)
+    from_5y = dt_now - relativedelta(years=5) - relativedelta(weeks=1)
 
-    cached = load_candles(session, instrument_id, from_5y, dt_now)
+    cached = load_candles(session, instrument_id, from_5y)#, dt_now)
 
     weekday_now = dt_now.isoweekday()
     weekday_bitmask_now = weekday_bitmask = 1 << weekday_now
@@ -360,7 +363,7 @@ def compute_metric(session: Session, instrument_id, fetch_remotely: bool) -> Met
         if candles:
             save_candles(session, instrument_id, candles, weekday_bitmask)
 
-        cached = load_candles(session, instrument_id, from_5y, dt_now)
+        cached = load_candles(session, instrument_id, from_5y) #, dt_now)
 
     c_sorted = sorted(cached, key=lambda x: x.date)
 
@@ -444,6 +447,20 @@ def main():
 
         if fetch:
             inst = fetch_instruments(session)
+
+            # delete non existing instruments
+            stmt = delete(Instrument).where(Instrument.instrument_id.not_in(list(inst)))
+            session.execute(stmt)
+            session.commit()
+            '''
+            stored_inst = load_instruments(session)
+            for si in stored_inst:
+                if si.instrument_id not in inst:
+                    session.delete(si)
+                    
+            session.commit()
+            '''
+            inst = list(inst.values())
         else:
             inst = load_instruments(session)
 
