@@ -233,9 +233,23 @@ def pct_change(start, end):
 def parse_db_date(dstr):
     return datetime.fromisoformat(dstr.replace("Z", "+00:00")).astimezone(pytz.UTC)
 
-def avg_annual_return(candles: list[Candle], years_duration: float, years_back: float = None):
+def get_price_at_date(sorted_candles: list[Candle], date: datetime):
+
+    d = None
+    for c in sorted_candles:
+        d = parse_db_date(c.date)
+
+        if d >= date:
+            break
     
-    if not candles or len(candles) < 2:
+    if d is None: # or d < date:
+        return None    
+    
+    return c.open;
+    
+def avg_annual_return(sorted_candles: list[Candle], years_duration: float, years_back: float = None):
+    
+    if not sorted_candles or len(sorted_candles) < 2:
         return None
     
     dt_now = datetime.now(timezone.utc)
@@ -246,36 +260,11 @@ def avg_annual_return(candles: list[Candle], years_duration: float, years_back: 
     if years_back:
         start_dt -= relativedelta(years=years_back)
         end_dt -= relativedelta(years=years_back)
+
+    start_price = get_price_at_date(sorted_candles, start_dt)
+    end_price = get_price_at_date(sorted_candles, end_dt)
     
-    d = None
-    for c in candles:
-        d = parse_db_date(c.date)
-
-        if d >= start_dt:
-            break
-    
-    if d is None: # or d < start_dt:
-        return None
-
-    start_price = c.open
-
-    ###
-
-    d = None
-    for c in candles:
-        d = parse_db_date(c.date)
-
-        if d >= end_dt:
-            break
-    
-    if d is None:
-        return None
-
-    #end_price = candles[-1].open
-    end_price = c.open
-
     return ((end_price / start_price) ** (1.0 / years_duration) - 1.0) * 100.0
-
 
 class MetricMeta:
     def __init__(self, from_dt: datetime = None) -> None:
